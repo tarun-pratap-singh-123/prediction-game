@@ -9,18 +9,19 @@
     "build": "tsc"
   },
   "dependencies": {
-    "ethers": "^6.10.0",
-    "pg": "^8.11.3",
+    "axios": "^1.13.2",
     "dotenv": "^16.4.1",
+    "ethers": "^6.10.0",
     "node-cron": "^3.0.3",
+    "pg": "^8.11.3",
     "redis": "^4.6.13"
   },
   "devDependencies": {
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2",
     "@types/node": "^20.11.16",
-    "@types/pg": "^8.11.0",
     "@types/node-cron": "^3.0.11",
-    "@types/redis": "^4.0.11"
+    "@types/pg": "^8.11.0",
+    "@types/redis": "^4.0.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   }
 }

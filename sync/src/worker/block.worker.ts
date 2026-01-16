@@ -4,13 +4,14 @@ import redisHelper from '../helpers/redis.helper';
 import { PREDICTION_MARKET_ABI } from '../abi';
 import { handleMarketCreated, handleBetPlaced, handleMarketResolved, handleWinningsClaimed } from '../listener';
 import pool from '../db';
+import { fetchUrl } from '../helpers/common.helper';
 
 const LAST_PROCESSED_BLOCK_KEY = 'LAST_PROCESSED_BLOCK';
 
 class BlockWorker {
     private isProcessing = false;
 
-    public startBlockWorker(provider: ethers.JsonRpcProvider, contractAddress: string) {
+    public startBlockWorker(provider: ethers.JsonRpcProvider, contractAddress: string, api: string) {
         const contract = new ethers.Contract(contractAddress, PREDICTION_MARKET_ABI, provider);
 
         cron.schedule('*/6 * * * * *', async () => {
@@ -21,104 +22,111 @@ class BlockWorker {
             this.isProcessing = true;
 
             try {
-                const latestBlock = await provider.getBlockNumber();
+                // fetch the latest block from the chain
+                const responseURLURL = await fetchUrl(api + "/block_results?height=");
+                const latestBlock = Number(responseURLURL?.result?.height);
                 let lastProcessedBlock = await redisHelper.get(LAST_PROCESSED_BLOCK_KEY);
 
                 if (lastProcessedBlock == null) {
-                    // If no last processed block, start from latest - 1 or a specific block
-                    // For now, let's start from latest - 100 to catch some recent history if fresh start
+                    // Start from latest - 1 if no history, or a safe default
                     lastProcessedBlock = (latestBlock - 1).toString();
                     await redisHelper.set(LAST_PROCESSED_BLOCK_KEY, lastProcessedBlock);
                 }
 
-                let startBlock = parseInt(lastProcessedBlock) + 1;
+                const startBlock = Number(lastProcessedBlock) + 1;
 
-                // Limit batch size to avoid overwhelming
+                // Limit batch size to avoid overwhelming (e.g. 10 blocks at a time)
+                // If we are far behind, we will catch up in subsequent runs
                 const endBlock = Math.min(latestBlock, startBlock + 10);
 
-                for (let blockNumber = startBlock; blockNumber <= endBlock; blockNumber++) {
-                    console.log(`Processing block ${blockNumber}`);
+                for (let index = startBlock; index <= endBlock; index++) {
 
-                    const block = await provider.getBlock(blockNumber);
-                    if (!block) {
-                        console.warn(`Block ${blockNumber} not found, skipping...`);
+                    // Check if block already exists in DB
+                    const blockExists = await pool.query('SELECT 1 FROM blocks WHERE number = $1', [index]);
+
+                    if (blockExists.rows.length > 0) {
+                        console.log("Block already present, skipping:", index);
+                        // Even if present, we might want to ensure Redis is updated, 
+                        // but if we are here it means we are re-processing or Redis was lost.
+                        // We continue to next block but update Redis at the end of loop or here.
+                        await redisHelper.set(LAST_PROCESSED_BLOCK_KEY, index.toString());
                         continue;
                     }
 
-                    // Check if block already exists in DB to avoid duplicates (idempotency)
-                    // Although our handlers have ON CONFLICT DO NOTHING, it's good to be safe/efficient
-                    // But we need to process events anyway.
+                    // continue processing if not found
+                    console.log("🚀 Block not found, processing:", index);
 
-                    // Fetch logs for this block
-                    const logs = await provider.getLogs({
-                        fromBlock: blockNumber,
-                        toBlock: blockNumber,
-                        address: contractAddress
-                    });
 
-                    for (const log of logs) {
+                    const blockDetail = await fetchUrl(api + `/block_results?height=${index}`);
+                    const blockHeaderDetail = await fetchUrl(api + `/header?height=${index}`);
+                    const blockTime = blockHeaderDetail?.result?.header?.time ?? new Date().toISOString();
+                    const timestamp = Math.floor(new Date(blockTime).getTime() / 1000);
+                    const tx_events = blockDetail?.result?.txs_results;
+
+                    const iface = new ethers.Interface(PREDICTION_MARKET_ABI);
+
+                    for (let tx_event_index = 0; tx_event_index < tx_events?.length; tx_event_index++) {
+                        const tx = tx_events[tx_event_index];
+                        const txLog = tx?.events?.find((e: any) => e.type === "tx_log");
+                        if (!txLog) continue;
+
+                        const txLogValue = txLog.attributes.find((a: any) => a.key === "txLog")?.value;
+                        if (!txLogValue) continue;
+
                         try {
-                            const parsedLog = contract.interface.parseLog({
-                                topics: log.topics as string[],
-                                data: log.data
-                            });
+                            const parsedLog = JSON.parse(txLogValue);
+                            const topics = parsedLog.topics;
+                            let data = parsedLog.data;
 
-                            if (!parsedLog) continue;
-
-                            const event = {
-                                ...log,
-                                blockNumber: log.blockNumber,
-                                transactionHash: log.transactionHash,
-                                index: log.index
-                            } as any as ethers.Log; // Cast to satisfy type, we mainly need basic props
-
-                            switch (parsedLog.name) {
-                                case 'MarketCreated':
-                                    await handleMarketCreated(
-                                        parsedLog.args[0], // marketId
-                                        parsedLog.args[1], // question
-                                        parsedLog.args[2], // creator
-                                        parsedLog.args[3], // endTime
-                                        event,
-                                        block
-                                    );
-                                    break;
-                                case 'BetPlaced':
-                                    await handleBetPlaced(
-                                        parsedLog.args[0], // marketId
-                                        parsedLog.args[1], // user
-                                        parsedLog.args[2], // isYes
-                                        parsedLog.args[3], // amount
-                                        event,
-                                        block
-                                    );
-                                    break;
-                                case 'MarketResolved':
-                                    await handleMarketResolved(
-                                        parsedLog.args[0], // marketId
-                                        parsedLog.args[1], // outcome
-                                        event,
-                                        block
-                                    );
-                                    break;
-                                case 'WinningsClaimed':
-                                    await handleWinningsClaimed(
-                                        parsedLog.args[0], // marketId
-                                        parsedLog.args[1], // user
-                                        parsedLog.args[2], // amount
-                                        event,
-                                        block
-                                    );
-                                    break;
+                            // Convert Base64 to Hex if necessary
+                            if (data && !data.startsWith('0x')) {
+                                data = '0x' + Buffer.from(data, 'base64').toString('hex');
                             }
-                        } catch (err) {
-                            console.error(`Error parsing log in block ${blockNumber}:`, err);
+
+                            const decodedLog = iface.parseLog({ topics, data });
+
+                            if (decodedLog) {
+                                // Construct mock Block object
+                                const blockObj = {
+                                    number: index,
+                                    hash: blockHeaderDetail?.result?.block_id?.hash || '',
+                                    parentHash: blockHeaderDetail?.result?.header?.last_block_id?.hash || '',
+                                    timestamp: timestamp
+                                } as any as ethers.Block;
+
+                                // Construct mock Log object
+                                const eventObj = {
+                                    index: parsedLog.logIndex,
+                                    transactionHash: parsedLog.transactionHash
+                                } as any as ethers.Log;
+
+                                switch (decodedLog.name) {
+                                    case "MarketCreated":
+                                        const { marketId, question, creator, endTime } = decodedLog.args;
+                                        await handleMarketCreated(marketId, question, creator, endTime, eventObj, blockObj);
+                                        break;
+                                    case "BetPlaced":
+                                        const { marketId: betMarketId, user, isYes, amount } = decodedLog.args;
+                                        await handleBetPlaced(betMarketId, user, isYes, amount, eventObj, blockObj);
+                                        break;
+                                    case "MarketResolved":
+                                        const { marketId: resolvedMarketId, outcome } = decodedLog.args;
+                                        await handleMarketResolved(resolvedMarketId, outcome, eventObj, blockObj);
+                                        break;
+                                    case "WinningsClaimed":
+                                        const { marketId: claimedMarketId, user: claimedUser, amount: claimedAmount } = decodedLog.args;
+                                        await handleWinningsClaimed(claimedMarketId, claimedUser, claimedAmount, eventObj, blockObj);
+                                        break;
+                                }
+                            }
+                        } catch (e) {
+                            console.error("Error parsing log:", e);
                         }
                     }
 
                     // Mark block as processed in Redis
-                    await redisHelper.set(LAST_PROCESSED_BLOCK_KEY, blockNumber.toString());
-                    console.log(`Block ${blockNumber} processed and saved`);
+                    await redisHelper.set(LAST_PROCESSED_BLOCK_KEY, index.toString());
+                    console.log(`Block ${index} processed and saved`);
                 }
 
             } catch (error) {

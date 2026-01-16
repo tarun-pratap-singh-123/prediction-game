@@ -16,7 +16,7 @@ const startSync = async () => {
     await redisHelper.connect();
 
     // Connect to RPC
-    const rpcUrl = process.env.RPC_URL;
+    const rpcUrl = String(process.env.RPC_URL);
     if (!rpcUrl) {
         console.error('RPC_URL is missing');
         process.exit(1);
@@ -24,7 +24,7 @@ const startSync = async () => {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
 
     // Connect to Contract
-    const contractAddress = process.env.CONTRACT_ADDRESS;
+    const contractAddress = String(process.env.CONTRACT_ADDRESS);
     if (!contractAddress) {
         console.error('CONTRACT_ADDRESS is missing');
         process.exit(1);
@@ -33,7 +33,7 @@ const startSync = async () => {
     console.log(`Listening to contract at ${contractAddress}`);
 
     // Start Block Worker
-    blockWorker.startBlockWorker(provider, contractAddress);
+    blockWorker.startBlockWorker(provider, contractAddress, rpcUrl);
 
     console.log('Sync Service is running with Block Worker...');
 };

@@ -9,6 +9,8 @@ class RedisHelper {
         });
 
         this.client.on('error', (err) => console.log('Redis Client Error', err));
+
+        console.log('Redis Client created', this.client);
     }
 
     async connect() {
