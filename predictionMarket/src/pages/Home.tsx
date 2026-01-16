@@ -1,52 +1,71 @@
-import { useState } from 'react';
-import { useAccount, useReadContract, useReadContracts } from 'wagmi';
+import { useState, useEffect } from 'react';
+import { useAccount } from 'wagmi';
 import { Link } from 'react-router-dom';
 import WalletConnect from '../components/WalletConnect';
 import MarketCard from '../components/MarketCard';
-import { PREDICTION_MARKET_ADDRESS } from '../config/contracts';
-import { PredictionMarketAbi } from '../abi/PredictionMarket';
+
+interface Market {
+    id: string;
+    question: string;
+    creator: string;
+    end_time: string;
+    resolved: boolean;
+    outcome: boolean | null;
+    status: string;
+    yes_volume: string;
+    no_volume: string;
+    total_volume: string;
+    block_number: string;
+    block_timestamp: string;
+    tx_hash: string;
+}
 
 export default function Home() {
     const { isConnected } = useAccount();
     const [filter, setFilter] = useState<'all' | 'active' | 'resolved'>('all');
+    const [markets, setMarkets] = useState<any[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isError, setIsError] = useState(false);
 
-    // Get market count
-    const { data: marketCount } = useReadContract({
-        address: PREDICTION_MARKET_ADDRESS,
-        abi: PredictionMarketAbi,
-        functionName: 'marketCount',
-    });
+    useEffect(() => {
+        const fetchMarkets = async () => {
+            setIsLoading(true);
+            setIsError(false);
+            try {
+                const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+                const url = new URL(`${apiUrl}/markets`);
+                if (filter === 'active') url.searchParams.append('status', 'ACTIVE');
+                if (filter === 'resolved') url.searchParams.append('status', 'RESOLVED');
 
-    // Fetch all markets
-    const { data: marketsData } = useReadContracts({
-        contracts: Array.from({ length: Number(marketCount || 0) }).map((_, i) => ({
-            address: PREDICTION_MARKET_ADDRESS,
-            abi: PredictionMarketAbi,
-            functionName: 'getMarket',
-            args: [BigInt(i)],
-        })),
-    });
+                const response = await fetch(url.toString());
+                if (!response.ok) throw new Error('Failed to fetch');
 
-    const markets = marketsData?.map((result, index) => {
-        if (result.status !== 'success') return null;
-        const market = result.result as any;
-        return {
-            id: index,
-            question: market.question,
-            creator: market.creator,
-            endTime: market.endTime,
-            yesPool: market.yesPool,
-            noPool: market.noPool,
-            resolved: market.resolved,
-            outcome: market.outcome,
+                const data: Market[] = await response.json();
+
+                const formattedMarkets = data.map((market) => ({
+                    id: Number(market.id),
+                    question: market.question,
+                    creator: market.creator,
+                    endTime: BigInt(market.end_time),
+                    yesPool: BigInt(market.yes_volume),
+                    noPool: BigInt(market.no_volume),
+                    resolved: market.resolved,
+                    outcome: market.outcome,
+                }));
+
+                setMarkets(formattedMarkets);
+            } catch (error) {
+                console.error("Error fetching markets:", error);
+                setIsError(true);
+            } finally {
+                setIsLoading(false);
+            }
         };
-    }).filter(m => m !== null) || [];
 
-    const filteredMarkets = markets.filter(market => {
-        if (filter === 'active') return !market.resolved && new Date(Number(market.endTime) * 1000) > new Date();
-        if (filter === 'resolved') return market.resolved;
-        return true;
-    });
+        fetchMarkets();
+    }, [filter]);
+
+    const filteredMarkets = markets;
 
     return (
         <div className="min-h-screen bg-dark-950">
@@ -104,7 +123,15 @@ export default function Home() {
                         </div>
 
                         {/* Markets Grid */}
-                        {filteredMarkets.length === 0 ? (
+                        {isLoading ? (
+                            <div className="text-center py-20">
+                                <p className="text-gray-400">Loading markets...</p>
+                            </div>
+                        ) : isError ? (
+                            <div className="text-center py-20">
+                                <p className="text-red-400">Error loading markets. Please try again later.</p>
+                            </div>
+                        ) : filteredMarkets.length === 0 ? (
                             <div className="text-center py-20">
                                 <div className="glass-card p-12 max-w-md mx-auto">
                                     <p className="text-gray-400 text-lg mb-6">No markets found</p>
@@ -116,7 +143,7 @@ export default function Home() {
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {filteredMarkets.map(market => (
-                                    <MarketCard key={market.id} market={market} />
+                                    <MarketCard key={market.id} market={{ ...market, outcome: market.outcome ?? false }} />
                                 ))}
                             </div>
                         )}

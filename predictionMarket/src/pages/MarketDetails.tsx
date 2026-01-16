@@ -6,23 +6,35 @@ import WalletConnect from '../components/WalletConnect';
 import { PREDICTION_MARKET_ADDRESS, MOCK_USDC_ADDRESS } from '../config/contracts';
 import { PredictionMarketAbi } from '../abi/PredictionMarket';
 import { MockUSDCAbi } from '../abi/MockUSDC';
+import { fetchMarket, Market } from '../api/markets';
 
 export default function MarketDetails() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const { address, isConnected } = useAccount();
 
-    const [betSide, setBetSide] = useState<'yes' | 'no'>('yes');
     const [betAmount, setBetAmount] = useState('');
     const [needsApproval, setNeedsApproval] = useState(false);
 
-    // Read market data
-    const { data: market, refetch: refetchMarket } = useReadContract({
-        address: PREDICTION_MARKET_ADDRESS,
-        abi: PredictionMarketAbi,
-        functionName: 'getMarket',
-        args: [BigInt(id || '0')],
-    });
+    const [market, setMarket] = useState<Market | null>(null);
+    const [isLoadingMarket, setIsLoadingMarket] = useState(true);
+
+    // Fetch market data from API
+    useEffect(() => {
+        const loadMarket = async () => {
+            if (!id) return;
+            setIsLoadingMarket(true);
+            try {
+                const data = await fetchMarket(id);
+                setMarket(data);
+            } catch (error) {
+                console.error("Error fetching market:", error);
+            } finally {
+                setIsLoadingMarket(false);
+            }
+        };
+        loadMarket();
+    }, [id]);
 
     // Read user position
     const { data: userPosition, refetch: refetchPosition } = useReadContract({
@@ -32,8 +44,16 @@ export default function MarketDetails() {
         args: [BigInt(id || '0'), address || '0x'],
     }) as { data: any; refetch: any };
 
+    // Read USDC balance
+    const { data: balance, refetch: refetchBalance } = useReadContract({
+        address: MOCK_USDC_ADDRESS,
+        abi: MockUSDCAbi,
+        functionName: 'balanceOf',
+        args: [address || '0x'],
+    });
+
     // Read USDC allowance
-    const { data: allowance } = useReadContract({
+    const { data: allowance, refetch: refetchAllowance } = useReadContract({
         address: MOCK_USDC_ADDRESS,
         abi: MockUSDCAbi,
         functionName: 'allowance',
@@ -58,19 +78,21 @@ export default function MarketDetails() {
     // Approve USDC
     const {
         data: approveHash,
-        writeContract: approve,
+        writeContractAsync: approve,
         isPending: isApprovePending,
+        error: approveError,
     } = useWriteContract();
 
-    const { isLoading: isApproveConfirming } = useWaitForTransactionReceipt({
+    const { isLoading: isApproveConfirming, isSuccess: isApproveSuccess } = useWaitForTransactionReceipt({
         hash: approveHash,
     });
 
     // Place bet
     const {
         data: betHash,
-        writeContract: placeBet,
+        writeContractAsync: placeBet,
         isPending: isBetPending,
+        error: betError,
     } = useWriteContract();
 
     const { isLoading: isBetConfirming, isSuccess: isBetSuccess } = useWaitForTransactionReceipt({
@@ -80,8 +102,9 @@ export default function MarketDetails() {
     // Resolve market
     const {
         data: resolveHash,
-        writeContract: resolveMarket,
+        writeContractAsync: resolveMarket,
         isPending: isResolvePending,
+        error: resolveError,
     } = useWriteContract();
 
     const { isSuccess: isResolveSuccess } = useWaitForTransactionReceipt({
@@ -91,45 +114,65 @@ export default function MarketDetails() {
     // Claim winnings
     const {
         data: claimHash,
-        writeContract: claimWinnings,
+        writeContractAsync: claimWinnings,
         isPending: isClaimPending,
+        error: claimError,
     } = useWriteContract();
 
     const { isSuccess: isClaimSuccess } = useWaitForTransactionReceipt({
         hash: claimHash,
     });
 
+    // Mint USDC (for testing)
+    const { writeContractAsync: mintUSDC, isPending: isMinting } = useWriteContract();
+
+    useEffect(() => {
+        if (isApproveSuccess) {
+            refetchAllowance();
+        }
+    }, [isApproveSuccess]);
+
     useEffect(() => {
         if (isBetSuccess || isResolveSuccess || isClaimSuccess) {
-            refetchMarket();
+            // Refetch market data from API (might need delay for sync)
+            setTimeout(() => {
+                if (id) fetchMarket(id).then(setMarket);
+            }, 2000);
             refetchPosition();
+            refetchAllowance();
+            refetchBalance();
         }
-    }, [isBetSuccess, isResolveSuccess, isClaimSuccess]);
+    }, [isBetSuccess, isResolveSuccess, isClaimSuccess, id]);
 
-    const handleApprove = () => {
+    const handleApprove = async () => {
         if (!betAmount) return;
         const amountWei = parseUnits(betAmount, 6);
 
-        approve({
-            address: MOCK_USDC_ADDRESS,
-            abi: MockUSDCAbi,
-            functionName: 'approve',
-            args: [PREDICTION_MARKET_ADDRESS, amountWei],
-        });
+        try {
+            await approve({
+                address: MOCK_USDC_ADDRESS,
+                abi: MockUSDCAbi,
+                functionName: 'approve',
+                args: [PREDICTION_MARKET_ADDRESS, amountWei],
+            });
+        } catch (err) {
+            console.error("Approval failed:", err);
+        }
     };
 
-    const handlePlaceBet = () => {
-        if (!betAmount) return;
-        const amountWei = parseUnits(betAmount, 6);
-
-        const functionName = betSide === 'yes' ? 'buyYes' : 'buyNo';
-
-        placeBet({
-            address: PREDICTION_MARKET_ADDRESS,
-            abi: PredictionMarketAbi,
-            functionName,
-            args: [BigInt(id || '0'), amountWei],
-        });
+    const handleMint = async () => {
+        if (!address) return;
+        try {
+            await mintUSDC({
+                address: MOCK_USDC_ADDRESS,
+                abi: MockUSDCAbi,
+                functionName: 'mint',
+                args: [address, parseUnits('1000', 6)],
+            });
+            setTimeout(refetchBalance, 2000);
+        } catch (err) {
+            console.error("Minting failed:", err);
+        }
     };
 
     const handleResolve = (outcome: boolean) => {
@@ -150,7 +193,7 @@ export default function MarketDetails() {
         });
     };
 
-    if (!market) {
+    if (isLoadingMarket || !market) {
         return (
             <div className="min-h-screen bg-dark-950 flex items-center justify-center">
                 <div className="loading-shimmer h-64 w-full max-w-4xl rounded-2xl" />
@@ -158,7 +201,10 @@ export default function MarketDetails() {
         );
     }
 
-    const [question, , endTime, yesPool, noPool, resolved, outcome] = market as any[];
+    const { question, end_time, yes_volume, no_volume, resolved, outcome } = market;
+    const endTime = BigInt(end_time);
+    const yesPool = BigInt(yes_volume);
+    const noPool = BigInt(no_volume);
 
     const totalPool = BigInt(yesPool) + BigInt(noPool);
     const yesPercentage = totalPool > 0n ? Number((BigInt(yesPool) * 10000n) / totalPool) / 100 : 50;
@@ -169,11 +215,11 @@ export default function MarketDetails() {
     const isActive = !resolved && !hasEnded;
 
     // Calculate potential winnings
-    const calculatePotentialWinnings = () => {
+    const calculatePotentialWinnings = (side: 'yes' | 'no') => {
         if (!betAmount) return 0;
         try {
             const amount = parseUnits(betAmount, 6);
-            const currentPool = betSide === 'yes' ? BigInt(yesPool) : BigInt(noPool);
+            const currentPool = side === 'yes' ? BigInt(yesPool) : BigInt(noPool);
             const newPool = currentPool + amount;
             const newTotal = totalPool + amount;
 
@@ -186,8 +232,23 @@ export default function MarketDetails() {
         }
     };
 
-    const potentialWinnings = calculatePotentialWinnings();
-    const potentialProfit = potentialWinnings - (betAmount ? parseFloat(betAmount) : 0);
+    const handlePlaceBet = async (side: 'yes' | 'no') => {
+        if (!betAmount) return;
+        const amountWei = parseUnits(betAmount, 6);
+        const finalId = BigInt(String(id));
+        const functionName = side === 'yes' ? 'buyYes' : 'buyNo';
+
+        try {
+            await placeBet({
+                address: PREDICTION_MARKET_ADDRESS,
+                abi: PredictionMarketAbi,
+                functionName,
+                args: [finalId, amountWei],
+            });
+        } catch (err) {
+            console.error("Betting failed:", err);
+        }
+    };
 
     return (
         <div className="min-h-screen bg-dark-950">
@@ -200,7 +261,17 @@ export default function MarketDetails() {
                         </button>
                         <h1 className="text-2xl font-bold text-gradient">Market Details</h1>
                     </div>
-                    <WalletConnect />
+                    <div className="flex items-center gap-4">
+                        {isConnected && balance !== undefined && (
+                            <div className="text-right">
+                                <p className="text-xs text-gray-400">Your Balance</p>
+                                <p className="text-sm font-bold text-primary-400">
+                                    ${Number(formatUnits(balance as bigint, 6)).toFixed(2)} USDC
+                                </p>
+                            </div>
+                        )}
+                        <WalletConnect />
+                    </div>
                 </div>
             </header>
 
@@ -310,48 +381,45 @@ export default function MarketDetails() {
                             <div className="glass-card p-6">
                                 <h3 className="text-xl font-bold mb-4">Place Bet</h3>
 
-                                {/* Side Selection */}
-                                <div className="grid grid-cols-2 gap-3 mb-4">
-                                    <button
-                                        onClick={() => setBetSide('yes')}
-                                        className={betSide === 'yes' ? 'btn-success' : 'btn-outline'}
-                                    >
-                                        YES
-                                    </button>
-                                    <button
-                                        onClick={() => setBetSide('no')}
-                                        className={betSide === 'no' ? 'btn-danger' : 'btn-outline'}
-                                    >
-                                        NO
-                                    </button>
-                                </div>
-
                                 {/* Amount Input */}
                                 <div className="mb-4">
                                     <label className="block text-sm font-semibold mb-2">Amount (USDC)</label>
-                                    <input
-                                        type="number"
-                                        value={betAmount}
-                                        onChange={(e) => setBetAmount(e.target.value)}
-                                        placeholder="0.00"
-                                        className="input"
-                                        step="0.01"
-                                        min="0"
-                                    />
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            value={betAmount}
+                                            onChange={(e) => setBetAmount(e.target.value)}
+                                            placeholder="0.00"
+                                            className="input flex-1"
+                                            step="0.01"
+                                            min="0"
+                                        />
+                                        {balance !== undefined && BigInt(balance as any) === 0n && (
+                                            <button
+                                                onClick={handleMint}
+                                                disabled={isMinting}
+                                                className="btn-outline text-xs py-2"
+                                            >
+                                                {isMinting ? '...' : 'Get USDC'}
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
 
-                                {/* Potential Winnings */}
+                                {/* Potential Winnings Display (for both sides) */}
                                 {betAmount && (
-                                    <div className="stat-card mb-4">
-                                        <div className="flex justify-between text-sm mb-1">
-                                            <span className="text-gray-400">Potential Winnings:</span>
-                                            <span className="font-bold">${potentialWinnings.toFixed(2)}</span>
+                                    <div className="space-y-2 mb-4">
+                                        <div className="stat-card">
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-success-500">If YES wins:</span>
+                                                <span className="font-bold">${calculatePotentialWinnings('yes').toFixed(2)}</span>
+                                            </div>
                                         </div>
-                                        <div className="flex justify-between text-sm">
-                                            <span className="text-gray-400">Potential Profit:</span>
-                                            <span className={`font-bold ${potentialProfit > 0 ? 'text-success-500' : 'text-danger-500'}`}>
-                                                ${potentialProfit.toFixed(2)}
-                                            </span>
+                                        <div className="stat-card">
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-danger-500">If NO wins:</span>
+                                                <span className="font-bold">${calculatePotentialWinnings('no').toFixed(2)}</span>
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -366,18 +434,35 @@ export default function MarketDetails() {
                                         {isApprovePending || isApproveConfirming ? 'Approving...' : 'Approve USDC'}
                                     </button>
                                 ) : (
-                                    <button
-                                        onClick={handlePlaceBet}
-                                        disabled={!betAmount || isBetPending || isBetConfirming}
-                                        className={betSide === 'yes' ? 'btn-success w-full' : 'btn-danger w-full'}
-                                    >
-                                        {isBetPending || isBetConfirming ? 'Placing Bet...' : `Bet ${betSide.toUpperCase()}`}
-                                    </button>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <button
+                                            onClick={() => handlePlaceBet('yes')}
+                                            disabled={!betAmount || isBetPending || isBetConfirming}
+                                            className="btn-success"
+                                        >
+                                            {isBetPending || isBetConfirming ? 'Buying...' : 'Buy YES'}
+                                        </button>
+                                        <button
+                                            onClick={() => handlePlaceBet('no')}
+                                            disabled={!betAmount || isBetPending || isBetConfirming}
+                                            className="btn-danger"
+                                        >
+                                            {isBetPending || isBetConfirming ? 'Buying...' : 'Buy NO'}
+                                        </button>
+                                    </div>
                                 )}
 
                                 {isBetSuccess && (
                                     <div className="mt-4 p-3 bg-success-500/10 border border-success-500/30 rounded-xl">
                                         <p className="text-success-500 text-sm">✓ Bet placed successfully!</p>
+                                    </div>
+                                )}
+
+                                {(approveError || betError) && (
+                                    <div className="mt-4 p-3 bg-danger-500/10 border border-danger-500/30 rounded-xl">
+                                        <p className="text-danger-500 text-sm">
+                                            Error: {approveError?.message || betError?.message || 'Transaction failed'}
+                                        </p>
                                     </div>
                                 )}
                             </div>
@@ -404,6 +489,11 @@ export default function MarketDetails() {
                                         {isResolvePending ? 'Resolving...' : 'NO Wins'}
                                     </button>
                                 </div>
+                                {resolveError && (
+                                    <div className="mt-4 p-3 bg-danger-500/10 border border-danger-500/30 rounded-xl">
+                                        <p className="text-danger-500 text-sm">Error: {resolveError.message}</p>
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -422,6 +512,11 @@ export default function MarketDetails() {
                                 {isClaimSuccess && (
                                     <div className="mt-4 p-3 bg-success-500/10 border border-success-500/30 rounded-xl">
                                         <p className="text-success-500 text-sm">✓ Winnings claimed!</p>
+                                    </div>
+                                )}
+                                {claimError && (
+                                    <div className="mt-4 p-3 bg-danger-500/10 border border-danger-500/30 rounded-xl">
+                                        <p className="text-danger-500 text-sm">Error: {claimError.message}</p>
                                     </div>
                                 )}
                             </div>
