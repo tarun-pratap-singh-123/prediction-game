@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: prediction-market-postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: prediction_market
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - prediction-market-network
+
+  redis:
+    image: redis:alpine
+    container_name: prediction-market-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - prediction-market-network
+    restart: always
+
+  # sync:
+  #   build: ./sync
+  #   container_name: prediction-market-sync
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     - DB_HOST=postgres
+  #     - DB_PORT=5432
+  #     - DB_USER=user
+  #     - DB_PASSWORD=password
+  #     - DB_NAME=prediction_market
+  #     # Add other env vars here or load from .env file
+  #   env_file:
+  #     - ./sync/.env
+  #   networks:
+  #     - prediction-market-network
+  #   restart: always
+
+  # backend-api:
+  #   build: ./backend-api
+  #   container_name: prediction-market-api
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - DB_HOST=postgres
+  #     - DB_PORT=5432
+  #     - DB_USER=user
+  #     - DB_PASSWORD=password
+  #     - DB_NAME=prediction_market
+  #     - PORT=3000
+  #   env_file:
+  #     - ./backend-api/.env
+  #   networks:
+  #     - prediction-market-network
+  #   restart: always
+
+networks:
+  prediction-market-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
